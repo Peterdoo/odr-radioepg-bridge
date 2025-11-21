@@ -31,7 +31,7 @@ from io import BytesIO
 
 from spi import DabBearer, IpBearer, Time, ServiceInfo, Multimedia, ShortName, MediumName, xml, binary, ShortDescription, LongDescription
 
-from mot import MotObject, ContentType, SortedHeaderInformation
+from mot import MotObject, ContentType, SortedHeaderInformation, DefaultPermitOutdatedVersions
 from mot.epg import EpgContentType, ScopeId, ScopeStart, ScopeEnd, UniqueBodyVersion
 
 from msc.datagroups import encode_directorymode
@@ -42,8 +42,11 @@ def parse_mux_pkt_size_addr(filename, args_packet_size, args_packet_address):
     mux_packet_size = -1
     mux_packet_address = -1
     mux_numepgs = 0
+    mux_num_audiosvcs = 0
     services = (parse_mux_config(filename))
     for service in services:
+      if service["bearer"].sid <= 65535:
+        mux_num_audiosvcs += 1
       if service["hasEPG"]:
         mux_numepgs += 1
         svc_packet_size = service["EPGpacketSize"]
@@ -83,7 +86,7 @@ def parse_mux_pkt_size_addr(filename, args_packet_size, args_packet_address):
         mux_packet_size = -1
         mux_packet_address = -1
         mux_packet_bitrate = -1
-    return mux_packet_size, mux_packet_address, mux_packet_bitrate
+    return mux_num_audiosvcs, mux_packet_size, mux_packet_address, mux_packet_bitrate
 
 def filter_by_bearer(service):
     bearers = [x for x in service.bearers if isinstance(x, (DabBearer))] # can include IP bearers if you like
@@ -210,7 +213,7 @@ def calculate_scope(schedule): # this should probably be in the main codebase
 
 class Generator:
 
-    def __init__(self, days, output, packet_size, packet_address, packet_bitrate, datagroup_output, one_bearer_per_service, ecc, eid, label, shortlabel):
+    def __init__(self, days, output, packet_size, packet_address, packet_bitrate, datagroup_output, one_bearer_per_service, ecc, eid, label, shortlabel, num_audiosvcs):
         self.days = days if days else 0
         self.output = output if output else 'output.dat'
         self.packet_size = packet_size
@@ -222,6 +225,7 @@ class Generator:
         self.label = label
         self.shortlabel = shortlabel
         self.one_bearer_per_service = one_bearer_per_service
+        self.num_audiosvcs = num_audiosvcs
 
         if self.datagroup_output:
             logger.debug('creating bitstream generator: days=%d, using datagroups', days)       
@@ -241,6 +245,7 @@ class Generator:
         
         now = datetime.today()
         nowutc32 = int(now.timestamp()) & 0x7FFFFFFF
+        num_logos = 0
 
         for response in responses:
             fqdn = response['fqdn']
@@ -320,6 +325,7 @@ class Generator:
                             media.type = Multimedia.LOGO_UNRESTRICTED 
 
                         new_media.append(media)
+                        num_logos += 1
   
                     service.media = new_media
      
@@ -455,11 +461,17 @@ class Generator:
                packetssize += len(pktbytes)
             if cyclesize == 0:
                cyclesize = packetssize
-
             logger.debug('expected SPI cycle time: %d seconds', round(cyclesize * 8 / self.packet_bitrate / 1000))
 
+        num_svcs_noradiodns = self.num_audiosvcs - len(all_services)
+        if num_svcs_noradiodns > 0:
+            logger.debug('%d services not encoded (no RadioDNS found)', num_svcs_noradiodns)
+        num_logos_missing = 4 * len(all_services) - num_logos
+        if num_logos_missing > 0:
+            logger.debug('%d logos not encoded (not found in RadioDNS)', num_logos_missing)
+
 # get packet_size and packet_address from the mux config
-mux_packet_size, mux_packet_address, mux_packet_bitrate = parse_mux_pkt_size_addr(args.f[0], args.packet_size, args.packet_address)
+mux_num_audiosvcs, mux_packet_size, mux_packet_address, mux_packet_bitrate = parse_mux_pkt_size_addr(args.f[0], args.packet_size, args.packet_address)
 if (mux_packet_size < 0) or (mux_packet_address < 0):
     logger.exception('failed to get packet size and packet address from config. Check config or specify them as command-line arguments')
 # get the services and applications that the mux config suggests and construct a new virtual SI file
@@ -467,5 +479,5 @@ from odr.radiodns.resolver import resolve_epg, parse_mux_ensemble
 ecc, eid, label, shortlabel = parse_mux_ensemble(args.f[0])
 generator = Generator(days=args.days, output=args.output, packet_size=mux_packet_size, packet_address=mux_packet_address, 
   packet_bitrate=mux_packet_bitrate, datagroup_output=args.datagroup_output,one_bearer_per_service=args.one_bearer_per_service,
-  ecc=ecc,eid=eid,label=label,shortlabel=shortlabel)
+  ecc=ecc,eid=eid,label=label,shortlabel=shortlabel,num_audiosvcs=mux_num_audiosvcs)
 resolved = resolve_epg(args.f[0], generator.generate_epg)
